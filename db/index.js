@@ -1,23 +1,18 @@
-const { Client } = require('pg') // imports the pg module
-const client = new Client('postgres://localhost:5432/juicebox-dev');
+const { Client } = require("pg");
 
-/**
- * USER Methods
- */
+const client = new Client({
+  connectionString: process.env.DATABASE_URL || 'postgres://localhost:5432/juicebox-dev',
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+});
 
-async function createUser({ 
-  username, 
-  password,
-  name,
-  location
-}) {
+async function createUser({ username, password, name, location }) {
   try {
-    const { rows: [user]} = await client.query(`
+    const {rows: [user]} = await client.query(`
       INSERT INTO users(username, password, name, location) 
       VALUES($1, $2, $3, $4) 
       ON CONFLICT (username) DO NOTHING 
       RETURNING *;
-    `, [username, password, name, location]);
+  `, [username, password, name, location]);
 
     return user;
   } catch (error) {
@@ -37,7 +32,7 @@ async function updateUser(id, fields = {}) {
   }
 
   try {
-    const { rows : [ user ] } = await client.query(`
+    const {rows: [user] } = await client.query(`
       UPDATE users
       SET ${ setString }
       WHERE id=${ id }
@@ -51,13 +46,11 @@ async function updateUser(id, fields = {}) {
 }
 
 async function getAllUsers() {
-  try {
-    const {  } = await client.query(`
-      SELECT id, username, name, location, active 
-      FROM users;
-    `);
-
-    return ;
+    try{ 
+      const { rows } = await client.query(`
+        SELECT id, 
+        username, name, location, active FROM users;`);
+    return rows;
   } catch (error) {
     throw error;
   }
@@ -65,12 +58,11 @@ async function getAllUsers() {
 
 async function getUserById(userId) {
   try {
-    const { rows : [ user ] } = await client.query(`
+    const { rows: [ user ] } = await client.query(`
       SELECT id, username, name, location, active
       FROM users
       WHERE id=${ userId }
     `);
-
     if (!user) {
       return null
     }
@@ -83,30 +75,86 @@ async function getUserById(userId) {
   }
 }
 
-/**
- * POST Methods
- */
-
- async function getAllPosts() {
+async function getPostById(postId) {
   try {
-    const { posts } = await client.query(`
-      SELECT id 
-      FROM users;
-    `)
+    const { rows: [ post ]  } = await client.query(`
+      SELECT *
+      FROM posts
+      WHERE id=$1;
+    `, [postId]);
 
+    if (!post) {
+      throw {
+        name: "PostNotFoundError",
+        message: "Could not find a post with that postId"
+      };
+    }
+    const { rows: tags } = await client.query(`
+      SELECT tags.*
+      FROM tags
+      JOIN post_tags ON tags.id=post_tags."tagId"
+      WHERE post_tags."postId"=$1;
+    `, [postId])
+
+    const { rows: [author] } = await client.query(`
+      SELECT id, username, name, location
+      FROM users
+      WHERE id=$1;
+    `, [post.authorId])
+
+    post.tags = tags.map(tag => tag.name)
+    post.author = author;
+
+    delete post.authorId;
+
+    return post;
   } catch (error) {
     throw error;
   }
 }
 
- async function createPost({
+async function createTags(tagList) {
+  if (tagList.length === 0) {
+    return;
+  }
+
+  const valuesStringInsert = tagList.map(
+    (_, index) => `$${index + 1}`
+  ).join('), (');
+
+  const valuesStringSelect = tagList.map(
+    (_, index) => `$${index + 1}`
+  ).join(', ');
+
+  try {
+    // insert all, ignoring duplicates
+    await client.query(`
+      INSERT INTO tags(name)
+      VALUES (${ valuesStringInsert })
+      ON CONFLICT (name) DO NOTHING;
+    `, tagList);
+
+    // grab all and return
+    const { rows } = await client.query(`
+      SELECT * FROM tags
+      WHERE name
+      IN (${ valuesStringSelect });
+    `, tagList);
+
+    return rows;
+  } catch (error) {
+    throw error;
+  }
+}
+
+async function createPost({
   authorId,
   title,
   content,
-  tags = [] // this is new
+  tags = []
 }) {
   try {
-    const { rows : [ post ] } = await client.query(`
+    const { rows: [ post ] } = await client.query(`
       INSERT INTO posts("authorId", title, content) 
       VALUES($1, $2, $3)
       RETURNING *;
@@ -115,6 +163,32 @@ async function getUserById(userId) {
     const tagList = await createTags(tags);
 
     return await addTagsToPost(post.id, tagList);
+  } catch (error) {
+    throw error;
+  }
+}
+
+async function createPostTag(postId, tagId) {
+  try {
+    await client.query(`
+      INSERT INTO post_tags("postId", "tagId")
+      VALUES ($1, $2)
+      ON CONFLICT ("postId", "tagId") DO NOTHING;
+    `, [postId, tagId]);
+  } catch (error) {
+    throw error;
+  }
+}
+
+async function addTagsToPost(postId, tagList) {
+  try {
+    const createPostTagPromises = tagList.map(
+      tag => createPostTag(postId, tag.id)
+    );
+
+    await Promise.all(createPostTagPromises);
+
+    return await getPostById(postId);
   } catch (error) {
     throw error;
   }
@@ -169,146 +243,50 @@ async function updatePost(postId, fields = {}) {
   }
 }
 
+async function getAllPosts() {
+  try {
+    const { rows: postIds } = await client.query(`
+      SELECT id
+      FROM posts;
+    `);
+
+    const posts = await Promise.all(postIds.map(
+      post => getPostById( post.id )
+    ));
+
+    return posts;
+  } catch (error) {
+    throw error;
+  }
+}
+
 async function getPostsByUser(userId) {
   try {
-    const {  } = await client.query(`
-      SELECT * 
-      FROM posts
+    const { rows: postIds } = await client.query(`
+      SELECT id 
+      FROM posts 
       WHERE "authorId"=${ userId };
     `);
 
-    return ;
+    const posts = await Promise.all(postIds.map(
+      post => getPostById( post.id )
+    ));
+
+    return posts;
   } catch (error) {
     throw error;
   }
 }
 
-async function getPostById(postId) {
+async function getUserByUsername(username) {
   try {
-    const { rows : [ post ]  } = await client.query(`
+    const { rows: [user] } = await client.query(`
       SELECT *
-      FROM posts
-      WHERE id=$1;
-    `, [postId]);
-
-    const { rows : tags } = await client.query(`
-      SELECT tags.*
-      FROM tags
-      JOIN post_tags ON tags.id=post_tags."tagId"
-      WHERE post_tags."postId"=$1;
-    `, [postId])
-
-    const { rows : [author] } = await client.query(`
-      SELECT id, username, name, location
       FROM users
-      WHERE id=$1;
-    `, [post.authorId])
+      WHERE username=$1;
+    `, [username]);
 
-    post.tags = tags;
-    post.author = author;
-
-    delete post.authorId;
-
-    return post;
-  } catch (error) {
-    throw error;
-  }
-}
-
-//TAGGGGGSSSSS**********
-
-async function createTags(tagList) {
-  if (tagList.length === 0) {
-    return;
-  }
-
-  const valuesStringInsert = tagList.map(
-    (_, index) => `$${index + 1}`
-  ).join('), (');
-
-  const valuesStringSelect = tagList.map(
-    (_, index) => `$${index + 1}`
-  ).join(', ');
-
-  try {
-    // insert all, ignoring duplicates
-    await client.query(`
-      INSERT INTO tags(name)
-      VALUES (${ valuesStringInsert })
-      ON CONFLICT (name) DO NOTHING;
-    `, tagList);
-
-    // grab all and return
-    const {  } = await client.query(`
-      SELECT * FROM tags
-      WHERE name
-      IN (${ valuesStringSelect });
-    `, tagList);
-
-    return ;
-  } catch (error) {
-    throw error;
-  }
-}
-
-async function createPostTag(postId, tagId) {
-  try {
-    await client.query(`
-      INSERT INTO post_tags("postId", "tagId")
-      VALUES ($1, $2)
-      ON CONFLICT ("postId", "tagId") DO NOTHING;
-    `, [postId, tagId]);
-  } catch (error) {
-    throw error;
-  }
-}
-
-async function addTagsToPost(postId, tagList) {
-  try {
-    const createPostTagPromises = tagList.map(
-      tag => createPostTag(postId, tag.id)
-    );
-
-    await Promise.all(createPostTagPromises);
-
-    return await getPostById(postId);
-  } catch (error) {
-    throw error;
-  }
-}
-
-async function createInitialTags() {
-  try {
-    console.log("Starting to create tags...");
-
-    const [happy, sad, inspo, catman] = await createTags([
-      '#happy', 
-      '#worst-day-ever', 
-      '#youcandoanything',
-      '#catmandoeverything'
-    ]);
-
-    const [postOne, postTwo, postThree] = await getAllPosts();
-
-    await addTagsToPost(postOne.id, [happy, inspo]);
-    await addTagsToPost(postTwo.id, [sad, inspo]);
-    await addTagsToPost(postThree.id, [happy, catman, inspo]);
-
-    console.log("Finished creating tags!");
-  } catch (error) {
-    console.log("Error creating tags!");
-    throw error;
-  }
-}
-
-async function getAllTags() {
-  try {
-    const { rows } = await client.query(`
-      SELECT * 
-      FROM tags;
-    `);
-
-    return {rows};
+    return user;
   } catch (error) {
     throw error;
   }
@@ -316,7 +294,7 @@ async function getAllTags() {
 
 async function getPostsByTagName(tagName) {
   try {
-    const { rows : postIds } = await client.query(`
+    const { rows: postIds } = await client.query(`
       SELECT posts.id
       FROM posts
       JOIN post_tags ON posts.id=post_tags."postId"
@@ -332,16 +310,34 @@ async function getPostsByTagName(tagName) {
   }
 } 
 
-module.exports = {  
+async function getAllTags() {
+  try {
+    const { rows: tags } = await client.query(`
+      SELECT *
+      FROM tags;
+    `);
+
+    return tags;
+  } catch (error) {
+    throw error;
+  }
+}
+  
+module.exports = {
   client,
   createUser,
   updateUser,
   getAllUsers,
   getUserById,
+  getPostById,
+  createTags,
   createPost,
+  createPostTag,
+  addTagsToPost,
   updatePost,
   getAllPosts,
   getPostsByUser,
-  createInitialTags,
-  getAllTags
+  getUserByUsername,
+  getPostsByTagName,
+  getAllTags,
 }
